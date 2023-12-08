@@ -363,37 +363,10 @@ func main() {
 		b, err := reader.ReadByte()
 		if b == Aux {
 			b, _ := reader.ReadByte()
-			// fmt.Println("key长度", b)
 			bytes := make([]byte, b)
 			reader.Read(bytes)
-			fmt.Print(string(bytes))
-			b, _ = reader.ReadByte()
-			isEncoded := false
-			length := 0
-			encType := b & 0xC0 >> 6
-			switch encType {
-			case 3:
-				isEncoded = true
-				length = int(b & 0x3F)
-			case 0:
-				length = int(b & 0x3F)
-			}
-
-			if isEncoded {
-				if length == 0 {
-					val := readSignedChar(reader)
-					fmt.Println(" ", val)
-					continue
-				} else if length == 2 {
-					signedInt := readSignedInt(reader)
-					fmt.Println(" ", signedInt)
-					continue
-				}
-			}
-			// fmt.Println("value长度", b)
-			bytes = make([]byte, b)
-			reader.Read(bytes)
-			fmt.Println(" ", string(bytes))
+			value := readString(reader)
+			fmt.Println(string(bytes), "", value)
 		} else if b == SelectDb {
 			dbNumber := readUnsignedChar(reader)
 			fmt.Println("SelectDb: ", dbNumber)
