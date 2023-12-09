@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/binary"
 	"fmt"
-	"github.com/pierrec/lz4"
 	"io"
 	"os"
 	"strconv"
@@ -29,13 +28,15 @@ type RedisKey struct {
 }
 
 const (
+	ModuleAux    = 247
 	IDLE         = 248
-	SelectDb     = 254
+	FREQ         = 249
 	Aux          = 250
 	ResizeDd     = 251
 	ExpiretimeMs = 252
 	EXPIRETIME   = 253
-	EOF          = 255 // 0xFF
+	SelectDb     = 254
+	EOF          = 0xFF // 0xFF
 )
 
 const (
@@ -48,39 +49,31 @@ const (
 
 const (
 	RedisRdbTypeString          = 0
-	RedisRdbTypeList            = 1
+	RedisRdbTypeList            = 1 // 猜测可能是linkedlist
 	RedisRdbTypeSet             = 2
 	RedisRdbTypeZset            = 3
-	RedisRdbTypeHash            = 4
+	RedisRdbTypeHash            = 4 // Hash hashtable
 	RedisRdbTypeZset2           = 5 // ZSET version 2 with doubles stored in binary.
 	RedisRdbTypeModule          = 6
 	RedisRdbTypeModule2         = 7
 	RedisRdbTypeHashZipmap      = 9
 	RedisRdbTypeListZiplist     = 10
-	RedisRdbTypeSetIntset       = 11
+	RedisRdbTypeSetIntset       = 11 // 存储整数的集合
 	RedisRdbTypeZsetZiplist     = 12
 	RedisRdbTypeHashZiplist     = 13
 	RedisRdbTypeListQuicklist   = 14
 	RedisRdbTypeStreamListpacks = 15
-	// hyperloglog
 )
 
 const (
-	REDIS_RDB_ENC_INT8  = 0
-	REDIS_RDB_ENC_INT16 = 1
-	REDIS_RDB_ENC_INT32 = 2
-	REDIS_RDB_ENC_LZF   = 3
+	RedisRdbEncInt8  = 0
+	RedisRdbEncInt16 = 1
+	RedisRdbEncInt32 = 2
+	RedisRdbEncLzf   = 3
 )
 
-// 读取有符号
 func readSignedChar(reader *bufio.Reader) int8 {
 	var value int8
-	binary.Read(reader, binary.LittleEndian, &value)
-	return value
-}
-
-func readSignedShort(reader *bufio.Reader) int16 {
-	var value int16
 	binary.Read(reader, binary.LittleEndian, &value)
 	return value
 }
@@ -88,6 +81,12 @@ func readSignedShort(reader *bufio.Reader) int16 {
 func readUnsignedChar(reader *bufio.Reader) uint8 {
 	b, _ := reader.ReadByte()
 	return b
+}
+
+func readSignedShort(reader *bufio.Reader) int16 {
+	var value int16
+	binary.Read(reader, binary.LittleEndian, &value)
+	return value
 }
 
 func readUnsignedShort(reader *bufio.Reader) uint16 {
@@ -102,11 +101,11 @@ func readSignedInt(reader *bufio.Reader) int32 {
 	return value
 }
 
-func readKey(reader *bufio.Reader) (uint8, string) {
+func readKey(reader *bufio.Reader) string {
 	keyLength := readUnsignedChar(reader)
 	bytes := make([]byte, keyLength)
 	reader.Read(bytes)
-	return keyLength, string(bytes)
+	return string(bytes)
 }
 
 func readUnsignedIntBe(reader *bufio.Reader) uint32 {
@@ -124,6 +123,12 @@ func readUnsignedLongBe(reader *bufio.Reader) uint64 {
 func readUnsignedLong(reader *bufio.Reader) uint64 {
 	var value uint64
 	binary.Read(reader, binary.LittleEndian, &value)
+	return value
+}
+
+func readSignedLong(reader *bufio.Reader) int64 {
+	var value int64
+	binary.Read(reader, binary.BigEndian, &value)
 	return value
 }
 
@@ -164,28 +169,28 @@ func readLength(reader *bufio.Reader) uint32 {
 func readString(reader *bufio.Reader) string {
 	length, isEncoded := readLengthWithEncoding(reader)
 	if isEncoded {
-		if length == REDIS_RDB_ENC_INT8 {
+		if length == RedisRdbEncInt8 {
 			char := readSignedChar(reader)
 			return fmt.Sprintf("%d", char)
-		} else if length == REDIS_RDB_ENC_INT16 {
+		} else if length == RedisRdbEncInt16 {
 			short := readSignedShort(reader)
 			return strconv.Itoa(int(short))
-		} else if length == REDIS_RDB_ENC_INT32 {
+		} else if length == RedisRdbEncInt32 {
 			integer := readSignedInt(reader)
 			return strconv.FormatInt(int64(integer), 10)
-		} else if length == REDIS_RDB_ENC_LZF {
+		} else if length == RedisRdbEncLzf {
 			//readByte, _ := reader.ReadByte()
 			//fmt.Println("读取到有符号 长度", readByte)
 			clen := readLength(reader)
-			l := readLength(reader)
+			readLength(reader)
 			//fmt.Println("chen", clen)
-			fmt.Println("l", l)
+			//fmt.Println("l", l)
 			bytes := make([]byte, clen)
 			reader.Read(bytes)
 			// TODO 使用lzf解压
 			//s, _ := decompress(bytes, l)
 			//fmt.Println("LZF解压: ", s)
-			return string(bytes[:10])
+			return string(bytes)
 		} else {
 			panic("未知类型")
 		}
@@ -197,53 +202,65 @@ func readString(reader *bufio.Reader) string {
 	return ""
 }
 
-func decompress(compressedData []byte, l uint32) (string, error) {
-	output := make([]byte, l) // 10 is just a multiplier, you may adjust it based on your data characteristics
+func readMillisecondsTime(reader *bufio.Reader) uint64 {
+	ts := readUnsignedLong(reader)
+	return ts
+}
 
-	n, err := lz4.UncompressBlock(compressedData, output)
-	if err != nil {
-		return "", err
+func readHashFromZiplist(reader *bufio.Reader) uint16 {
+	rawString := readString(reader)
+	bytes := []byte(rawString)
+	_ = binary.LittleEndian.Uint32(bytes[:4])       // zlbytes 4byte
+	_ = binary.LittleEndian.Uint32(bytes[4:8])      // zltail  4byte
+	zlen := binary.LittleEndian.Uint16(bytes[8:10]) // zle     2byte
+	numEntries := zlen / 2
+	//fmt.Println("zlbytes", zlbytes, "zltail", zltail, "zlen", zlen, "numEntries", numEntries)
+
+	// TODO 等待实现读取entry， entry的结构为 entry-header，entry-encoding，entry-data
+	// entry-header 1字节，entry-encoding 1字节，entry-data 1字节
+	//startIndex := 0
+	bytes = bytes[10:]
+	for i := 0; i < int(numEntries); i++ {
+		// | Prev Length | Encoding | Data | Length |
+		field, index := readZiplistEntry(bytes)
+		bytes = bytes[index:]
+		value, index := readZiplistEntry(bytes)
+		bytes = bytes[index:]
+		fmt.Println("field", field, "value", value)
 	}
 
-	return string(output[:n]), nil
-}
-
-func readMillisecondsTime(reader *bufio.Reader) {
-	readUnsignedLong(reader)
-	//milliseconds := readUnsignedLong(reader)
-	//fmt.Println("过期时间", milliseconds)
-}
-
-func readHashFromZiplist(reader *bufio.Reader) {
-	readString(reader)
-	//fmt.Println("rawString", rawString)
-	// TODO 等待实现
+	// ziplist结构结尾字节固定为 0xFF
+	zlend := bytes[len(bytes)-1]
+	if zlend != 0xff {
+		panic("ziplist结尾不为0xff")
+	}
+	return numEntries
 }
 
 func readIntSet(reader *bufio.Reader) []int64 {
 	rawString := readString(reader)
-	bytes1 := []byte(rawString)
-	encoding := binary.LittleEndian.Uint32(bytes1[:4])
-	numEntries := binary.LittleEndian.Uint32(bytes1[4:8])
+	bytes := []byte(rawString)
+	encoding := binary.LittleEndian.Uint32(bytes[:4])
+	numEntries := binary.LittleEndian.Uint32(bytes[4:8])
 
-	int64s := make([]int64, 0)
+	intArr := make([]int64, 0)
 	start := 8
 	for i := 0; i < int(numEntries); i++ {
 		if encoding == 8 {
-			entry := int64(binary.BigEndian.Uint32(bytes1[8:]))
-			int64s = append(int64s, entry)
+			entry := int64(binary.BigEndian.Uint32(bytes[8:]))
+			intArr = append(intArr, entry)
 		} else if encoding == 4 {
-			entry := int64(binary.LittleEndian.Uint32(bytes1[start : start+4]))
-			int64s = append(int64s, entry)
+			entry := int64(binary.LittleEndian.Uint32(bytes[start : start+4]))
+			intArr = append(intArr, entry)
 			start += 4
 		} else if encoding == 2 {
-			entry := int64(binary.LittleEndian.Uint16(bytes1[start : start+2]))
-			int64s = append(int64s, entry)
+			entry := int64(binary.LittleEndian.Uint16(bytes[start : start+2]))
+			intArr = append(intArr, entry)
 			start += 2
 		}
 	}
 
-	return int64s
+	return intArr
 }
 
 func readBinaryDouble(reader *bufio.Reader) float64 {
@@ -252,7 +269,7 @@ func readBinaryDouble(reader *bufio.Reader) float64 {
 	return value
 }
 
-func read_float(reader *bufio.Reader) {
+func readFloat(reader *bufio.Reader) {
 	char := readUnsignedChar(reader)
 	if char == 253 {
 
@@ -262,11 +279,25 @@ func read_float(reader *bufio.Reader) {
 	}
 }
 
-func readZsetFromZiplist(reader *bufio.Reader) {
-	readString(reader)
-	//fmt.Println("rawString", rawString)
-
-	// todo 待解析
+func readZsetFromZiplist(reader *bufio.Reader) []string {
+	rawString := readString(reader)
+	bytes := []byte(rawString)
+	_ = binary.LittleEndian.Uint32(bytes[:4])             // zlbytes
+	_ = binary.LittleEndian.Uint32(bytes[4:8])            // zltail
+	numEntries := binary.LittleEndian.Uint16(bytes[8:10]) // zllen
+	members := make([]string, 0)
+	numEntries = numEntries / 2
+	bytes = bytes[10:]
+	for i := 0; i < int(numEntries); i++ {
+		member, index := readZiplistEntry(bytes)
+		bytes = bytes[index:]
+		// score, 无用
+		score, index := readZiplistEntry(bytes)
+		bytes = bytes[index:]
+		fmt.Println("member", member, "score", score)
+		members = append(members, member)
+	}
+	return members
 }
 
 func readUnsignedInt(reader *bufio.Reader) uint32 {
@@ -275,83 +306,102 @@ func readUnsignedInt(reader *bufio.Reader) uint32 {
 	return value
 }
 
-func readSignedLong(reader *bufio.Reader) int64 {
-	var value int64
-	binary.Read(reader, binary.BigEndian, &value)
-	return value
-}
-
-func read_ziplist_entry(bytes []byte) string {
-	prev_length := bytes[0]
-	if prev_length == 254 {
+// https://github.com/redis/redis/blob/15b993f1ef6ec436c1c2f411232b27d150a6c168/src/ziplist.c#L284
+// ziplist entry
+// prevrawlensize
+// prevrawlen
+// lensize
+// len
+// headersize
+// encoding 编码方式
+// *p
+func readZiplistEntry(bytes []byte) (string, int) {
+	prevLen := bytes[0]
+	if prevLen == 254 {
 		//prev_length := readUnsignedInt(reader)
 	}
-	entry_header := bytes[1]
-	if entry_header>>6 == 0 {
-		length := entry_header & 0x3F
+	entryHeader := bytes[1]
+	if entryHeader>>6 == 0 {
+		length := entryHeader & 0x3F
 		value := bytes[2 : 2+length]
-		return string(value)
-	} else if entry_header>>6 == 1 {
-		length := entry_header&0x3F | bytes[2]
+		return string(value), int(2 + length)
+	} else if entryHeader>>6 == 1 {
+		length := entryHeader&0x3F | bytes[2]
 		value := bytes[3 : 3+length]
-		fmt.Println(value)
-	} else if entry_header>>6 == 2 {
+		return string(value), int(3 + length)
+	} else if entryHeader>>6 == 2 {
+		fmt.Println("6 ==2")
 		//length := readUnsignedIntBe(reader)
 		//value := make([]byte, length)
 		//fmt.Println(value)
-	} else if entry_header>>4 == 12 {
+	} else if entryHeader>>4 == 12 {
+		fmt.Println("4 == 12")
 		//length := readSignedShort(reader)
 		//value := make([]byte, length)
 		//fmt.Println(value)
-	} else if entry_header>>4 == 13 {
+	} else if entryHeader>>4 == 13 {
+		fmt.Println("4 == 13")
+		value := int32(binary.LittleEndian.Uint32(bytes[2:6]))
 		//length := readSignedInt(reader)
 		//value := make([]byte, length)
 		//fmt.Println(value)
-	} else if entry_header>>4 == 14 {
-		//length := readSignedLong(reader)
-		//value := make([]byte, length)
-		//fmt.Println(value)
-	} else if entry_header == 240 {
+		return strconv.FormatInt(int64(value), 10), 6
+	} else if entryHeader>>4 == 14 {
+		value := int64(binary.LittleEndian.Uint64(bytes[2:10]))
+		return strconv.FormatInt(value, 10), 10
+	} else if entryHeader == 240 {
+		fmt.Println("240")
 
+	} else if entryHeader == 254 {
+		b := bytes[2]
+		return strconv.Itoa(int(b)), 3
+	} else if entryHeader >= 241 && entryHeader <= 253 {
+		return strconv.Itoa(int(entryHeader - 241)), 2
+	} else {
+		panic("Invalid entry_header")
 	}
-	return ""
+	return "", 0
 
 }
 
-func readListFromQuicklist(reader *bufio.Reader) {
+func readListFromQuicklist(reader *bufio.Reader) []string {
 	count := readLength(reader)
 	totalSize := 0
+	elements := make([]string, 0)
 	//fmt.Println("count", count)
 	for i := 0; i < int(count); i++ {
 		rawString := readString(reader)
 		totalSize += len(rawString)
-		bytes1 := []byte(rawString)
-		//zlbytes := binary.LittleEndian.Uint32(bytes1[:4])
-		//tail_offset := binary.LittleEndian.Uint32(bytes1[4:8])
+		bytes := []byte(rawString)
+		// 存储压缩列表的总字节数
+		//zlbytes := binary.LittleEndian.Uint32(bytes[:4])
+		//tail_offset := binary.LittleEndian.Uint32(bytes[4:8])
 		//fmt.Println("zlbytes", zlbytes, "tail_offset", tail_offset)
-		numEntries := binary.LittleEndian.Uint16(bytes1[8:10])
-		elements := make([]string, 0)
+		numEntries := binary.LittleEndian.Uint16(bytes[8:10])
+		bytes = bytes[10:]
+
 		for i := 0; i < int(numEntries); i++ {
-			entry := read_ziplist_entry(bytes1[10:])
+			entry, index := readZiplistEntry(bytes)
+			bytes = bytes[index:]
 			elements = append(elements, entry)
 		}
-		fmt.Println(elements)
 	}
+	return elements
 }
 
 func main() {
-	fmt.Println("开始解析")
-
-	// 读取文件
 	//fileName := "/Users/xiangzheng/dump.rdb"
 	fileName := "/Users/xiangzheng/Downloads/hins22112154_data_20231207012206.rdb"
-	// 打开文件
-	file, _ := os.Open(fileName)
-	reader := bufio.NewReaderSize(file, 50*1024*1024)
+	file, err := os.Open(fileName)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 
 	defer file.Close()
+	reader := bufio.NewReaderSize(file, 50*1024*1024)
 
-	// 解析文件
+	// REDIS0009
 	magicString := make([]byte, 9)
 	file.Read(magicString)
 	fmt.Println(string(magicString))
@@ -376,31 +426,20 @@ func main() {
 			expireSize := readLength(reader)
 			fmt.Println("dbSize", dbSize, "expireSize", expireSize)
 		} else if b == RedisRdbTypeListQuicklist {
-			_, key := readKey(reader)
-
-			// list key后面有一个字节数据，不清楚作用
-			//count := readUnsignedChar(reader)
-			//bytes := readLength(reader)
-			//
-			//valueBytes := make([]byte, bytes)
-			//reader.Read(valueBytes)
-			//fmt.Println("List key:", key)
-
-			fmt.Print("List key: ", key, " 元素: ")
-			readListFromQuicklist(reader)
-			keys = append(keys, RedisKey{db, key, 0, 0, List, 0})
+			keyName := readKey(reader)
+			elements := readListFromQuicklist(reader)
+			fmt.Println("List key:", keyName, " 元素: ", elements)
+			keys = append(keys, RedisKey{db, keyName, 0, 0, List, uint32(len(elements))})
 		} else if b == RedisRdbTypeString {
-			_, key := readKey(reader)
+			keyName := readKey(reader)
 			value := readString(reader)
-			fmt.Println("Str key:", key, "value:", value)
+			//fmt.Println("Str key:", keyName, "value:", value)
 			// 读取但不打印为了测试
-			keys = append(keys, RedisKey{db, key, 0, uint32(len(value)), String, 1})
+			keys = append(keys, RedisKey{db, keyName, 0, uint32(len(value)), String, 1})
 		} else if b == ExpiretimeMs {
 			// 过期时间
 			readMillisecondsTime(reader)
-			//b, _ = reader.ReadByte()
-			//readKey(reader)
-
+			//fmt.Println("过期时间", mts)
 		} else if b == EXPIRETIME {
 			fmt.Println("待解析过期时间")
 		} else if b == EOF {
@@ -408,36 +447,36 @@ func main() {
 			reader.Read(crc32CheckSum)
 			break
 		} else if b == RedisRdbTypeZsetZiplist {
-			_, key := readKey(reader)
-			fmt.Println("ZSET(ziplist), key:", key)
-			readZsetFromZiplist(reader)
-			keys = append(keys, RedisKey{db, key, 0, 0, ZSet, 1})
+			keyName := readKey(reader)
+			if keyName == "last_reported" {
+				fmt.Println(keyName)
+			}
+
+			members := readZsetFromZiplist(reader)
+			keys = append(keys, RedisKey{db, keyName, 0, 0, ZSet, uint32(len(members))})
+			fmt.Println("ZSET(ziplist), key:", keyName, ", Value: ", members)
 		} else if b == IDLE {
 			// 返回idle的值，猜测可能是剩余秒数
 			readLength(reader)
-		} else if b == RedisRdbTypeHashZiplist {
-			_, key := readKey(reader)
-			//fmt.Println("hash_ziplist, key:", key)
-			readHashFromZiplist(reader)
-			keys = append(keys, RedisKey{db, key, 0, 0, List, 1})
 		} else if b == RedisRdbTypeSet {
-			_, key := readKey(reader)
+			keyName := readKey(reader)
 			length := readLength(reader)
-			fmt.Println("Set key: ", key, "元素数量: ", length)
-			// for 循环
+			members := make([]string, 0)
 			for i := 0; i < int(length); i++ {
-				readString(reader)
+				member := readString(reader)
+				members = append(members, member)
 			}
-			keys = append(keys, RedisKey{db, key, 0, 0, Set, length})
+			fmt.Println("Set(hashtable) key:", keyName, "元素数量: ", length, ",元素: ", members)
+			keys = append(keys, RedisKey{db, keyName, 0, 0, Set, length})
 		} else if b == RedisRdbTypeSetIntset {
-			_, key := readKey(reader)
+			keyName := readKey(reader)
 			members := readIntSet(reader)
-			fmt.Println("Set(int), key:", key, ", Value: ", members)
-			keys = append(keys, RedisKey{db, key, 0, 0, Set, uint32(len(members))})
+			fmt.Println("Set(int), key:", keyName, ", Value: ", members)
+			keys = append(keys, RedisKey{db, keyName, 0, 0, Set, uint32(len(members))})
 		} else if b == RedisRdbTypeZset2 || b == RedisRdbTypeZset {
-			lens, key := readKey(reader)
+			keyName := readKey(reader)
 			membersLength := readLength(reader)
-			fmt.Println("ZSET, key:", key, "长度:", lens, "元素数量:", membersLength)
+			fmt.Println("ZSET, key:", keyName, "元素数量:", membersLength)
 			for i := 0; i < int(membersLength); i++ {
 				readString(reader) // member
 				if b == RedisRdbTypeZset2 {
@@ -447,26 +486,36 @@ func main() {
 				if b == RedisRdbTypeZset {
 				}
 			}
-			keys = append(keys, RedisKey{db, key, 0, 0, ZSet, membersLength})
+			keys = append(keys, RedisKey{db, keyName, 0, 0, ZSet, membersLength})
+		} else if b == RedisRdbTypeHashZiplist {
+			keyName := readKey(reader)
+			fmt.Println("Hash(ziplist), key:", keyName)
+			nums := readHashFromZiplist(reader)
+			keys = append(keys, RedisKey{db, keyName, 0, 0, Hash, uint32(nums)})
 		} else if b == RedisRdbTypeHash {
-			_, key := readKey(reader)
+			keyName := readKey(reader)
 			length := readLength(reader)
-			fmt.Println("HASH, key:", key, "长度:", length)
+			fmt.Print("Hash(hashtable), key:", keyName, "长度:", length)
+			var count uint32 = 0
 			for i := 0; i < int(length); i++ {
 				field := readString(reader)
 				value := readString(reader)
-				fmt.Println("field:", field, ", value:", value)
+				fmt.Print(", field:", field, ", value:", value)
+				count++
 			}
-			keys = append(keys, RedisKey{db, key, 0, 0, Hash, length})
-
+			fmt.Println()
+			keys = append(keys, RedisKey{db, keyName, 0, 0, Hash, count})
+		} else if b == RedisRdbTypeStreamListpacks {
+			keyName := readKey(reader)
+			fmt.Println("待解析stream: ", keyName)
 		} else {
-			_, key := readKey(reader)
-			fmt.Println("读取到未知类型, key:", key)
+			keyName := readKey(reader)
+			fmt.Println("读取到未知类型, key:", keyName, "类型:", b)
 			break
 		}
 
 		if err == io.EOF {
-			fmt.Println("读取完毕！")
+			fmt.Println("Done")
 			break
 		}
 	}
