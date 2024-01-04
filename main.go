@@ -35,8 +35,8 @@ const (
 	ResizeDd     = 251
 	ExpiretimeMs = 252
 	EXPIRETIME   = 253
-	SelectDb     = 254
-	EOF          = 0xFF // 0xFF
+	SelectDb     = 254 // DB number of the following keys.
+	EOF          = 255 // End of the RDB file. 0xFF
 )
 
 const (
@@ -102,7 +102,9 @@ func readSignedInt(reader *bufio.Reader) int32 {
 }
 
 func readKey(reader *bufio.Reader) string {
+	// 读取key长度
 	keyLength := readUnsignedChar(reader)
+	// 读取key
 	bytes := make([]byte, keyLength)
 	reader.Read(bytes)
 	return string(bytes)
@@ -188,8 +190,6 @@ func readString(reader *bufio.Reader) string {
 			bytes := make([]byte, clen)
 			reader.Read(bytes)
 			// TODO 使用lzf解压
-			//s, _ := decompress(bytes, l)
-			//fmt.Println("LZF解压: ", s)
 			return string(bytes)
 		} else {
 			panic("未知类型")
@@ -340,11 +340,7 @@ func readZiplistEntry(bytes []byte) (string, int) {
 		//value := make([]byte, length)
 		//fmt.Println(value)
 	} else if entryHeader>>4 == 13 {
-		fmt.Println("4 == 13")
 		value := int32(binary.LittleEndian.Uint32(bytes[2:6]))
-		//length := readSignedInt(reader)
-		//value := make([]byte, length)
-		//fmt.Println(value)
 		return strconv.FormatInt(int64(value), 10), 6
 	} else if entryHeader>>4 == 14 {
 		value := int64(binary.LittleEndian.Uint64(bytes[2:10]))
@@ -390,8 +386,8 @@ func readListFromQuicklist(reader *bufio.Reader) []string {
 }
 
 func main() {
-	//fileName := "/Users/xiangzheng/dump.rdb"
-	fileName := "/Users/xiangzheng/Downloads/hins22112154_data_20231207012206.rdb"
+	fileName := "/Users/xiangzheng/dump.rdb"
+	//fileName := "/Users/xiangzheng/Downloads/hins22112154_data_20231207012206.rdb"
 	file, err := os.Open(fileName)
 	if err != nil {
 		fmt.Println(err)
@@ -424,7 +420,7 @@ func main() {
 		} else if b == ResizeDd {
 			dbSize := readLength(reader)
 			expireSize := readLength(reader)
-			fmt.Println("dbSize", dbSize, "expireSize", expireSize)
+			fmt.Println("dbSize:", dbSize, "expireSize:", expireSize)
 		} else if b == RedisRdbTypeListQuicklist {
 			keyName := readKey(reader)
 			elements := readListFromQuicklist(reader)
